@@ -1,45 +1,67 @@
 import { useEffect, useMemo, useState } from "react";
-import { Ban, Check, Info, Search } from "lucide-react";
+import { Ban, Check, Info, Search, X } from "lucide-react";
 import {
   controls,
-  decodeModel,
   emptyPick,
   jobs,
-  listBy,
   match,
-  rdsChoices,
   schemeFor,
   traps,
   unitById,
   units,
-  ventChoices,
   type Finding,
   type Pick,
-  type RdsId,
-  type Role,
   type Unit,
-  type VentId,
 } from "@/lib/hvac";
 
-type Tab = "bench" | "catalog" | "number" | "traps";
+const examples = ["27SPA", "24ACC", "59TP6", "37MURA", "FE5B", "CVAMA"];
 
-const archetypes: { title: string; body: string; source: string }[] = [
-  { title: "ABCD — Infinity / Evolution", body: "A зелёный и B жёлтый — данные, C белый — 24V common, D красный — 24V hot. Variable speed без этого пульта не собирается. A и B не менять.", source: "UI_SI, F086" },
-  { title: "24V, кондиционер", body: "R, C, G, Y, W. Две ступени добавляют Y2 и W2. Поплавок рвёт R. Предохранитель платы — штатный, обычно 3 A.", source: "F002, F004, INS-012" },
-  { title: "24V, тепловой насос Carrier/Bryant", body: "Те же клеммы плюс O: реверсивный клапан под напряжением в охлаждении. В настройках пульта — heat pump, не conventional.", source: "F016, SM_9" },
-  { title: "24V, crossover 37MURA / 37MUHA", body: "Обычный термостат и DIP SW1-2. 24V на S1/S2 нельзя. Реверс здесь на B и под напряжением в нагреве, не как у остальных Carrier.", source: "MURA_IM, F016" },
-  { title: "R-454B, канальный змеевик печи", body: "Y идёт через dissipation board и только потом на наружный блок. Мигание 7/8 — ошибка Y/W. Сенсор 20% LFL, плату не обходят.", source: "F094, F095" },
-  { title: "Мини-сплит", body: "Своя головка и тот же хладагент. Межблочный кабель не путать с канальным 24V. Порог сенсора R-454B у ductless — 10% LFL.", source: "CAR_TG, INS-008" },
-  { title: "Goodman A2E", body: "Новая печь и старый змеевик R-410A/R-22: A2E → NO и снять питание. На R-32 A2E не выключать, жгут сенсора SER2A08012S.", source: "F112, F113, F114" },
-];
+const roleName: Record<Unit["role"], string> = {
+  outdoor: "наружный",
+  ahandler: "фанкойл",
+  coil: "змеевик",
+  furnace: "печь",
+  "ductless-out": "мини-сплит",
+  "ductless-in": "головка",
+};
+
+function norm(s: string) {
+  return s.toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function searchUnits(q: string): Unit[] {
+  const n = norm(q);
+  if (n.length < 2) return [];
+  return units
+    .map((u) => {
+      const m = norm(u.model);
+      let score = 0;
+      if (m === n) score = 200;
+      else if (m.startsWith(n)) score = 120;
+      else if (n.startsWith(m) && m.length >= 4) score = 110;
+      else if (m.includes(n)) score = 60;
+      else if (norm(`${u.brand}${u.line}`).includes(n)) score = 20;
+      return { u, score };
+    })
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score || a.u.model.localeCompare(b.u.model))
+    .slice(0, 8)
+    .map((x) => x.u);
+}
+
+function defaultControl(unit: Unit): string | null {
+  if (unit.control === "abcd") return unit.family === "bryant" ? "systxbbuid01" : "systxccitc01";
+  if (unit.control === "24v" || unit.control === "mura-24v") return "t6";
+  return null;
+}
 
 export function Sborka() {
-  const [tab, setTab] = useState<Tab>("bench");
   const [pick, setPick] = useState<Pick>(emptyPick);
   const [ready, setReady] = useState(false);
-  const [jobId, setJobId] = useState<string | null>(null);
-  const [checked, setChecked] = useState(false);
   const [q, setQ] = useState("");
+  const [controlsOpen, setControlsOpen] = useState(false);
+  const [more, setMore] = useState(false);
+  const [jobId, setJobId] = useState<string | null>(null);
 
   useEffect(() => {
     try {
@@ -57,447 +79,343 @@ export function Sborka() {
 
   const findings = useMemo(() => match(pick), [pick]);
   const scheme = useMemo(() => schemeFor(pick, findings), [pick, findings]);
-  const stops = findings.filter((f) => f.level === "stop").length;
-
-  function patch(partial: Partial<Pick>) {
-    setPick((p) => ({ ...p, ...partial }));
-    setChecked(false);
-  }
-
-  function loadJob(id: string) {
-    const job = jobs.find((j) => j.id === id);
-    if (!job) return;
-    setPick({ ...emptyPick, ...job.apply });
-    setJobId(id);
-    setChecked(false);
-    setTab("bench");
-  }
-
+  const stops = findings.filter((f) => f.level === "stop");
+  const oks = findings.filter((f) => f.level === "ok");
+  const notes = findings.filter((f) => f.level === "note");
+  const hits = searchUnits(q);
+  const started =
+    pick.mode === "goodman" || !!(pick.outdoorId || pick.indoorId || pick.furnaceId || pick.coilId);
   const job = jobs.find((j) => j.id === jobId) ?? null;
 
+  function place(unit: Unit) {
+    const typed = q.trim();
+    const fuller = norm(typed).startsWith(norm(unit.model)) && norm(typed).length > norm(unit.model).length;
+    setPick((p) => {
+      const next: Pick = { ...p, mode: unit.role.startsWith("ductless") ? "ductless" : "ducted" };
+      const outdoor = unitById(p.outdoorId);
+      if (unit.role === "outdoor" || unit.role === "ductless-out") {
+        next.outdoorId = unit.id;
+        if (fuller) next.outdoorSerial = typed;
+        const control = defaultControl(unit);
+        if (control) next.controlId = control;
+        if (unit.role === "ductless-out") {
+          next.furnaceId = null;
+          next.coilId = null;
+          next.rds = "none";
+          next.vent = "none";
+          const indoor = unitById(next.indoorId);
+          if (indoor && indoor.role !== "ductless-in") next.indoorId = null;
+        } else {
+          const indoor = unitById(next.indoorId);
+          if (indoor?.role === "ductless-in") next.indoorId = null;
+        }
+      } else if (unit.role === "ductless-in") {
+        next.indoorId = unit.id;
+        next.furnaceId = null;
+        next.coilId = null;
+        next.rds = "none";
+        if (outdoor && outdoor.role !== "ductless-out") next.outdoorId = null;
+      } else if (unit.role === "ahandler") {
+        next.indoorId = unit.id;
+        next.furnaceId = null;
+        next.coilId = null;
+        next.vent = "none";
+        next.rds = unit.builtinRds ? "builtin" : "none";
+        if (fuller) next.indoorSerial = typed;
+        if (outdoor?.role === "ductless-out") next.outdoorId = null;
+      } else if (unit.role === "furnace") {
+        next.furnaceId = unit.id;
+        next.indoorId = null;
+        next.vent = unit.vent === "pvc" ? "pvc" : unit.vent === "b" ? "b" : "none";
+        if (outdoor?.role === "ductless-out") next.outdoorId = null;
+      } else {
+        next.coilId = unit.id;
+        next.indoorId = null;
+        if (fuller) next.indoorSerial = typed;
+        const gas = unit.refrigerant === "R-454B" || outdoor?.refrigerant === "R-454B";
+        next.rds = gas ? "field" : "none";
+        if (outdoor?.role === "ductless-out") next.outdoorId = null;
+      }
+      return next;
+    });
+    setQ("");
+    setControlsOpen(false);
+  }
+
+  function clearSlot(key: "outdoorId" | "indoorId" | "furnaceId" | "coilId") {
+    setPick((p) => ({
+      ...p,
+      [key]: null,
+      ...(key === "outdoorId" ? { outdoorSerial: "" } : {}),
+      ...(key === "indoorId" || key === "coilId" ? { indoorSerial: "" } : {}),
+      ...(key === "furnaceId" ? { vent: "none" as const } : {}),
+    }));
+  }
+
+  const slots = [
+    unitById(pick.outdoorId),
+    unitById(pick.indoorId),
+    unitById(pick.furnaceId),
+    unitById(pick.coilId),
+  ].filter(Boolean) as Unit[];
+
   return (
-    <main className="mx-auto min-h-screen max-w-6xl px-4 py-6 sm:px-6">
-      <header className="mb-6 flex flex-col gap-4 border-b border-ink/15 pb-5 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <p className="font-mono text-xs tracking-widest text-brass">ПОЛЕВОЙ РАЗБОР · НЕ ИГРА</p>
-          <h1 className="mt-1 text-3xl font-semibold tracking-tight">Сборка</h1>
-          <p className="mt-2 max-w-xl text-sm leading-relaxed text-muted">
-            Что с чем стыкуется: хладагент, номинал, пульт, вентиляция печи и плата A2L. Правила взяты из базы «HVAC Game», лист «Каталог» и записи по 24V, ABCD и R-454B. Где строки нет — пара не считается разрешённой.
-          </p>
-        </div>
-        <p className="font-mono text-xs text-muted">134 строки · Carrier / Bryant · 4 окт 2026</p>
+    <main className="mx-auto min-h-screen max-w-lg px-4 py-5">
+      <header className="mb-4">
+        <p className="font-mono text-xs tracking-widest text-brass">ПОЛЕ · CARRIER / BRYANT</p>
+        <h1 className="mt-1 text-3xl font-semibold tracking-tight">Сборка</h1>
+        <p className="mt-2 text-sm leading-relaxed text-muted">
+          Вбей номер с шильдика. Наружный, фанкойл, печь или змеевик сами встанут на свои места. Пульт и вентиляция подставятся из каталога — поменять можно ниже.
+        </p>
       </header>
 
-      <nav className="mb-5 flex flex-wrap gap-2">
-        {(
-          [
-            ["bench", "Стенд"],
-            ["catalog", "Каталог"],
-            ["number", "Номер"],
-            ["traps", "Как не собрать"],
-          ] as const
-        ).map(([id, label]) => (
-          <button
-            key={id}
-            type="button"
-            onClick={() => setTab(id)}
-            className={`min-h-11 rounded-full px-4 text-sm font-medium ${tab === id ? "bg-ink text-bg" : "bg-surface text-ink"}`}
-          >
-            {label}
+      <label className="flex min-h-12 items-center gap-2 rounded-xl border border-ink/20 bg-surface px-3">
+        <Search className="size-4 shrink-0 text-muted" aria-hidden="true" />
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="27SPA, FE5B, 59TP6…"
+          className="min-h-12 w-full bg-transparent font-mono text-base outline-none"
+          autoCapitalize="characters"
+          autoCorrect="off"
+          spellCheck={false}
+        />
+        {q && (
+          <button type="button" aria-label="Стереть" onClick={() => setQ("")} className="grid size-11 place-items-center text-muted">
+            <X className="size-4" />
           </button>
-        ))}
-      </nav>
+        )}
+      </label>
 
-      {tab === "bench" && (
-        <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-          <section className="flex flex-col gap-4">
-            <div className="flex flex-wrap gap-2">
-              {(
-                [
-                  ["ducted", "Канальная"],
-                  ["ductless", "Мини-сплит"],
-                  ["goodman", "Goodman A2L"],
-                ] as const
-              ).map(([id, label]) => (
+      {q.trim().length >= 2 && hits.length === 0 && (
+        <p className="mt-3 text-sm text-muted">В каталоге такого номера нет. Это сверка с базой, не поиск по всем брендам.</p>
+      )}
+      {hits.length > 0 && (
+        <ul className="mt-2 overflow-hidden rounded-xl border border-ink/15 bg-surface">
+          {hits.map((u) => (
+            <li key={u.id} className="border-b border-ink/10 last:border-b-0">
+              <button type="button" onClick={() => place(u)} className="flex min-h-14 w-full items-center justify-between gap-3 px-3 text-left">
+                <span>
+                  <span className="block font-mono text-base font-semibold">{u.model}</span>
+                  <span className="block text-xs text-muted">
+                    {u.brand} · {roleName[u.role]} · {u.refrigerant === "unknown" ? "хладагент не разведён" : u.refrigerant}
+                  </span>
+                </span>
+                <span className="shrink-0 text-sm font-medium text-brass">Поставить</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {!started && hits.length === 0 && (
+        <div className="mt-4 flex flex-wrap gap-2">
+          {examples.map((ex) => (
+            <button key={ex} type="button" onClick={() => setQ(ex)} className="min-h-11 rounded-full bg-surface px-3 font-mono text-sm">
+              {ex}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {slots.length > 0 && (
+        <section className="mt-5">
+          <h2 className="text-sm font-semibold">Связка</h2>
+          <ul className="mt-2 flex flex-col gap-2">
+            {slots.map((u) => (
+              <li key={u.id} className="flex items-center justify-between gap-2 rounded-xl border border-ink/15 bg-surface px-3 py-2">
+                <span>
+                  <span className="block font-mono text-xs text-brass">{roleName[u.role]}</span>
+                  <span className="font-mono text-lg font-semibold">{u.model}</span>
+                  <span className="block text-xs text-muted">
+                    {u.brand}
+                    {u.refrigerant !== "unknown" ? ` · ${u.refrigerant}` : ""}
+                    {u.line ? ` · ${u.line}` : ""}
+                  </span>
+                </span>
                 <button
-                  key={id}
                   type="button"
-                  onClick={() => patch({ mode: id, outdoorId: null, indoorId: null, furnaceId: null, coilId: null })}
-                  className={`min-h-11 rounded-md px-3 text-sm ${pick.mode === id ? "bg-brass text-bg" : "bg-surface text-ink"}`}
+                  aria-label={`Убрать ${u.model}`}
+                  onClick={() =>
+                    clearSlot(
+                      u.role === "outdoor" || u.role === "ductless-out"
+                        ? "outdoorId"
+                        : u.role === "furnace"
+                          ? "furnaceId"
+                          : u.role === "coil"
+                            ? "coilId"
+                            : "indoorId",
+                    )
+                  }
+                  className="grid size-11 place-items-center rounded-md text-muted"
                 >
-                  {label}
+                  <X className="size-4" />
                 </button>
-              ))}
-            </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
-            <div className="rounded-xl border border-ink/15 bg-surface p-4">
-              <h2 className="text-sm font-semibold">Задания</h2>
-              <ul className="mt-3 flex flex-col gap-2">
-                {jobs.map((item) => (
-                  <li key={item.id}>
-                    <button
-                      type="button"
-                      onClick={() => loadJob(item.id)}
-                      className={`w-full rounded-lg px-3 py-2 text-left ${jobId === item.id ? "bg-ink text-bg" : "bg-bg text-ink"}`}
-                    >
-                      <span className="block text-sm font-medium">{item.title}</span>
-                      <span className={`mt-1 block text-xs leading-relaxed ${jobId === item.id ? "text-bg/80" : "text-muted"}`}>{item.brief}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </div>
+      {pick.mode !== "goodman" && pick.outdoorId && unitById(pick.outdoorId)?.role !== "ductless-out" && (
+        <p className="mt-3 text-sm text-muted">
+          Пульт: {controls.find((c) => c.id === pick.controlId)?.name ?? "не выбран"}.{" "}
+          <button type="button" onClick={() => setControlsOpen((v) => !v)} className="inline-flex min-h-11 items-center font-medium text-brass">
+            {controlsOpen ? "Скрыть" : "Сменить"}
+          </button>
+        </p>
+      )}
 
-            {pick.mode === "goodman" ? (
-              <GoodmanForm pick={pick} patch={patch} />
-            ) : (
-              <DuctForm pick={pick} patch={patch} />
-            )}
-          </section>
-
-          <section className="flex flex-col gap-4">
-            <div className="rounded-xl border border-ink/15 bg-surface p-4">
-              <div className="flex items-baseline justify-between gap-3">
-                <h2 className="text-sm font-semibold">Вердикт</h2>
-                <p className="font-mono text-xs text-brass">{stops === 0 ? "СТОПОВ НЕТ" : `СТОП: ${stops}`}</p>
-              </div>
-              <ul className="mt-3 flex flex-col gap-3">
-                {findings.map((f, i) => (
+      {started && (
+        <section className="mt-5 rounded-xl border border-ink/15 bg-surface p-4">
+          <p className={`font-mono text-xs tracking-widest ${stops.length ? "text-brass" : "text-ink"}`}>
+            {stops.length ? `СТОП · ${stops.length}` : "СХОДИТСЯ"}
+          </p>
+          <h2 className="mt-1 text-xl font-semibold leading-snug">
+            {stops.length ? stops[0].title : oks[0]?.title ?? "База эту связку пропускает"}
+          </h2>
+          <p className="mt-2 text-sm leading-relaxed text-muted">{stops.length ? stops[0].detail : oks[0]?.detail}</p>
+          {(stops.length > 1 || notes.length > 0 || oks.length > 1) && (
+            <details className="mt-3">
+              <summary className="min-h-11 cursor-pointer text-sm font-medium">Остальные пункты</summary>
+              <ul className="mt-2 flex flex-col gap-3">
+                {[...stops.slice(1), ...oks.slice(stops.length ? 0 : 1), ...notes].map((f, i) => (
                   <FindingRow key={`${f.title}-${i}`} finding={f} />
                 ))}
               </ul>
-              {job && (
-                <div className="mt-4 border-t border-ink/15 pt-4">
-                  <button type="button" onClick={() => setChecked(true)} className="min-h-11 rounded-md bg-ink px-4 text-sm font-medium text-bg">
-                    Проверить задание
-                  </button>
-                  {checked && (
-                    <p className="mt-3 text-sm font-medium">
-                      {job.pass(pick, findings) ? "Сходится. Эту связку база пропускает." : "Пока нет. Смотри стопы сверху и условие задания."}
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
-
-            <div className="rounded-xl border border-ink/15 bg-surface p-4">
-              <h2 className="text-sm font-semibold">Схема этой связки</h2>
-              {scheme ? (
-                <>
-                  <p className="mt-2 font-medium">{scheme.title}</p>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    {scheme.chips.map((chip) => (
-                      <div key={chip.name} className="min-w-28 rounded-md border border-ink/15 bg-bg px-3 py-2">
-                        <p className="font-mono text-lg font-semibold">{chip.name}</p>
-                        <p className="text-xs leading-snug text-muted">{chip.hint}</p>
-                      </div>
-                    ))}
-                  </div>
-                  <ol className="mt-4 flex list-decimal flex-col gap-2 pl-4 text-sm leading-relaxed">
-                    {scheme.steps.map((step) => (
-                      <li key={step}>{step}</li>
-                    ))}
-                  </ol>
-                  <p className="mt-3 font-mono text-xs text-muted">{scheme.source}</p>
-                </>
-              ) : (
-                <p className="mt-2 text-sm leading-relaxed text-muted">Схему не рисую, пока в вердикте есть стоп. Иначе получится картинка неправильного монтажа.</p>
-              )}
-            </div>
-          </section>
-        </div>
+            </details>
+          )}
+          {job && (
+            <p className="mt-3 border-t border-ink/15 pt-3 text-sm font-medium">
+              {job.pass(pick, findings) ? "Задание закрыто." : "Задание пока не закрыто — смотри стоп."}
+            </p>
+          )}
+        </section>
       )}
 
-      {tab === "catalog" && (
-        <Catalog
-          query={q}
-          setQuery={setQ}
-          onUse={(unit) => {
-            const slot =
-              unit.role === "outdoor" || unit.role === "ductless-out"
-                ? "outdoorId"
-                : unit.role === "furnace"
-                  ? "furnaceId"
-                  : unit.role === "coil"
-                    ? "coilId"
-                    : "indoorId";
-            const mode = unit.role === "ductless-out" || unit.role === "ductless-in" ? "ductless" : "ducted";
-            patch({ mode, [slot]: unit.id });
-            setTab("bench");
-          }}
-        />
-      )}
-
-      {tab === "number" && <Decoder onUse={(id, serial) => { patch({ mode: "ducted", outdoorId: id, outdoorSerial: serial }); setTab("bench"); }} />}
-
-      {tab === "traps" && (
-        <div className="grid gap-4 lg:grid-cols-2">
-          {traps.map((trap) => (
-            <article key={trap.title} className="rounded-xl border border-ink/15 bg-surface p-4">
-              <h2 className="font-medium">{trap.title}</h2>
-              <p className="mt-2 text-sm leading-relaxed text-muted">{trap.body}</p>
-              <p className="mt-3 font-mono text-xs text-brass">{trap.source}</p>
-            </article>
-          ))}
-          {archetypes.map((item) => (
-            <article key={item.title} className="rounded-xl border border-ink/15 bg-bg p-4">
-              <h2 className="font-medium">{item.title}</h2>
-              <p className="mt-2 text-sm leading-relaxed">{item.body}</p>
-              <p className="mt-3 font-mono text-xs text-muted">{item.source}</p>
-            </article>
+      {controlsOpen && pick.mode !== "goodman" && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {controls.map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              onClick={() => {
+                setPick((p) => ({ ...p, controlId: c.id }));
+                setControlsOpen(false);
+              }}
+              className={`min-h-11 rounded-full px-3 text-sm ${pick.controlId === c.id ? "bg-ink text-bg" : "bg-surface text-ink"}`}
+            >
+              {c.name.replace(/ SYSTX\w+/, "").replace(" / Connex", "")}
+            </button>
           ))}
         </div>
       )}
+
+      {scheme && (
+        <section className="mt-4 rounded-xl border border-ink/15 bg-surface p-4">
+          <h2 className="text-sm font-semibold">{scheme.title}</h2>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {scheme.chips.map((chip) => (
+              <div key={chip.name} className="min-w-24 rounded-md border border-ink/15 bg-bg px-3 py-2">
+                <p className="font-mono text-lg font-semibold">{chip.name}</p>
+                <p className="text-xs leading-snug text-muted">{chip.hint}</p>
+              </div>
+            ))}
+          </div>
+          <ol className="mt-4 flex list-decimal flex-col gap-2 pl-4 text-sm leading-relaxed">
+            {scheme.steps.map((step) => (
+              <li key={step}>{step}</li>
+            ))}
+          </ol>
+        </section>
+      )}
+
+      <section className="mt-6">
+        <button type="button" onClick={() => setMore((v) => !v)} className="min-h-11 text-sm font-medium text-brass">
+          {more ? "Скрыть задания и ловушки" : "Задания и типичные ошибки"}
+        </button>
+        {more && (
+          <div className="mt-3 flex flex-col gap-4">
+            <div className="flex flex-col gap-2">
+              {jobs.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
+                    setPick({ ...emptyPick, ...item.apply });
+                    setJobId(item.id);
+                    setQ("");
+                  }}
+                  className={`rounded-xl px-3 py-3 text-left ${jobId === item.id ? "bg-ink text-bg" : "bg-surface"}`}
+                >
+                  <span className="block text-sm font-medium">{item.title}</span>
+                  <span className={`mt-1 block text-xs leading-relaxed ${jobId === item.id ? "text-bg/80" : "text-muted"}`}>{item.brief}</span>
+                </button>
+              ))}
+              {pick.mode === "goodman" && (
+                <GoodmanBits pick={pick} setPick={setPick} />
+              )}
+            </div>
+            {traps.map((trap) => (
+              <article key={trap.title}>
+                <h3 className="text-sm font-medium">{trap.title}</h3>
+                <p className="mt-1 text-sm leading-relaxed text-muted">{trap.body}</p>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
 
       <footer className="mt-8 border-t border-ink/15 pt-4 text-xs leading-relaxed text-muted">
-        Индекс базы 0.2. Посерийно разложены Carrier и Bryant. Папки Lennox, Trane, Rheem, Goodman, Mitsubishi в Drive есть, каталогов моделей в них ещё нет — эти марки в подбор не подставлены. Goodman разобран только по плате A2E (F112–F114). Это обучалка по записям базы, не замена шильдика и мануала на объекте.
+        Это сверка с записями базы, не замена шильдика. Lennox, Trane, Rheem и Mitsubishi в подбор не входят — каталогов моделей в базе ещё нет.
       </footer>
     </main>
   );
 }
 
+function GoodmanBits({ pick, setPick }: { pick: Pick; setPick: (p: Pick) => void }) {
+  return (
+    <div className="rounded-xl border border-ink/15 bg-surface p-3">
+      <p className="text-sm font-medium">Goodman: змеевик и A2E</p>
+      <div className="mt-2 flex flex-wrap gap-2">
+        {(
+          [
+            ["r410a", "R-410A"],
+            ["r22", "R-22"],
+            ["r32", "R-32"],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setPick({ ...pick, goodmanCoil: id })}
+            className={`min-h-11 rounded-full px-3 text-sm ${pick.goodmanCoil === id ? "bg-ink text-bg" : "bg-bg"}`}
+          >
+            {label}
+          </button>
+        ))}
+        <button
+          type="button"
+          onClick={() => setPick({ ...pick, a2e: pick.a2e === "on" ? "off" : "on" })}
+          className="min-h-11 rounded-full bg-bg px-3 text-sm"
+        >
+          {pick.a2e === "on" ? "A2E включён" : "A2E в NO"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function FindingRow({ finding }: { finding: Finding }) {
   const Icon = finding.level === "stop" ? Ban : finding.level === "ok" ? Check : Info;
-  const tone = finding.level === "stop" ? "text-brass" : finding.level === "ok" ? "text-ink" : "text-muted";
+  const tone = finding.level === "stop" ? "text-brass" : "text-ink";
   return (
     <li className="flex gap-3">
       <Icon className={`mt-0.5 size-4 shrink-0 ${tone}`} aria-hidden="true" />
       <div>
-        <p className={`text-sm font-medium ${tone}`}>{finding.level === "stop" ? "Стоп. " : finding.level === "ok" ? "Можно. " : "Смотри. "}{finding.title}</p>
+        <p className={`text-sm font-medium ${tone}`}>{finding.title}</p>
         <p className="mt-1 text-sm leading-relaxed text-muted">{finding.detail}</p>
-        <p className="mt-1 font-mono text-xs text-muted">{finding.source}</p>
       </div>
     </li>
-  );
-}
-
-function DuctForm({ pick, patch }: { pick: Pick; patch: (p: Partial<Pick>) => void }) {
-  const ductless = pick.mode === "ductless";
-  return (
-    <div className="flex flex-col gap-3">
-      <UnitSelect
-        label={ductless ? "Наружный мини-сплит" : "Наружный блок"}
-        units={listBy(ductless ? "ductless-out" : "outdoor")}
-        value={pick.outdoorId}
-        onChange={(outdoorId) => patch({ outdoorId })}
-      />
-      <label className="block text-sm">
-        <span className="mb-1 block font-medium">Полный номер наружного, если есть</span>
-        <input
-          value={pick.outdoorSerial}
-          onChange={(e) => patch({ outdoorSerial: e.target.value })}
-          placeholder="27SPA660A003"
-          className="min-h-11 w-full rounded-md border border-ink/15 bg-bg px-3 font-mono text-sm"
-        />
-      </label>
-      <UnitSelect
-        label={ductless ? "Внутренний блок" : "Фанкойл"}
-        units={listBy(ductless ? "ductless-in" : "ahandler")}
-        value={pick.indoorId}
-        onChange={(indoorId) => patch({ indoorId })}
-      />
-      {!ductless && (
-        <>
-          <UnitSelect label="Печь" units={listBy("furnace")} value={pick.furnaceId} onChange={(furnaceId) => patch({ furnaceId })} />
-          <UnitSelect label="Змеевик на печь" units={listBy("coil")} value={pick.coilId} onChange={(coilId) => patch({ coilId })} />
-          <label className="block text-sm">
-            <span className="mb-1 block font-medium">Полный номер змеевика или фанкойла</span>
-            <input
-              value={pick.indoorSerial}
-              onChange={(e) => patch({ indoorSerial: e.target.value })}
-              placeholder="293VAN03600A"
-              className="min-h-11 w-full rounded-md border border-ink/15 bg-bg px-3 font-mono text-sm"
-            />
-          </label>
-          <SelectRow
-            label="Вентиляция печи"
-            value={pick.vent}
-            onChange={(vent) => patch({ vent: vent as VentId })}
-            options={ventChoices.map((v) => ({ id: v.id, label: v.name }))}
-          />
-          <SelectRow
-            label="Плата A2L / RDS"
-            value={pick.rds}
-            onChange={(rds) => patch({ rds: rds as RdsId })}
-            options={rdsChoices.map((v) => ({ id: v.id, label: v.name }))}
-          />
-        </>
-      )}
-      <SelectRow
-        label="Пульт"
-        value={pick.controlId ?? ""}
-        onChange={(controlId) => patch({ controlId: controlId || null })}
-        options={[{ id: "", label: "Не выбран" }, ...controls.map((c) => ({ id: c.id, label: c.name }))]}
-      />
-      {!ductless && (
-        <button
-          type="button"
-          onClick={() => patch({ hasC: !pick.hasC })}
-          className="min-h-11 rounded-md border border-ink/15 bg-bg px-3 text-left text-sm"
-        >
-          {pick.hasC ? "Жила C в кабеле есть" : "Жилы C нет"}
-        </button>
-      )}
-    </div>
-  );
-}
-
-function GoodmanForm({ pick, patch }: { pick: Pick; patch: (p: Partial<Pick>) => void }) {
-  return (
-    <div className="flex flex-col gap-3 rounded-xl border border-ink/15 bg-surface p-4">
-      <h2 className="text-sm font-semibold">Печь Goodman / Amana 2025+ и змеевик</h2>
-      <p className="text-sm leading-relaxed text-muted">Моделей наружных блоков Goodman в листе каталога нет. Здесь только развилка A2E из сервисных записей.</p>
-      <SelectRow
-        label="Змеевик"
-        value={pick.goodmanCoil}
-        onChange={(goodmanCoil) => patch({ goodmanCoil: goodmanCoil as Pick["goodmanCoil"] })}
-        options={[
-          { id: "r32", label: "R-32, сенсор на месте" },
-          { id: "r410a", label: "Старый R-410A" },
-          { id: "r22", label: "Старый R-22" },
-        ]}
-      />
-      <SelectRow
-        label="Плата, пункт A2E"
-        value={pick.a2e}
-        onChange={(a2e) => patch({ a2e: a2e as Pick["a2e"] })}
-        options={[
-          { id: "on", label: "A2E включён, как с завода" },
-          { id: "off", label: "A2E переведён в NO" },
-        ]}
-      />
-    </div>
-  );
-}
-
-function UnitSelect({ label, units: list, value, onChange }: { label: string; units: Unit[]; value: string | null; onChange: (id: string | null) => void }) {
-  const [filter, setFilter] = useState("");
-  const shown = list.filter((u) => `${u.brand} ${u.model} ${u.line} ${u.refrigerant}`.toLowerCase().includes(filter.trim().toLowerCase()));
-  const current = unitById(value);
-  return (
-    <div className="rounded-xl border border-ink/15 bg-surface p-3">
-      <label className="block text-sm font-medium">
-        {label}
-        <input
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          placeholder="Фильтр по модели"
-          className="mt-2 min-h-11 w-full rounded-md border border-ink/15 bg-bg px-3 text-sm"
-        />
-        <select
-          value={value ?? ""}
-          onChange={(e) => onChange(e.target.value || null)}
-          className="mt-2 min-h-11 w-full rounded-md border border-ink/15 bg-bg px-3 text-sm"
-        >
-          <option value="">Не выбран</option>
-          {shown.map((u) => (
-            <option key={u.id} value={u.id}>
-              {u.brand} {u.model} · {u.refrigerant === "unknown" ? ventLabel(u) : u.refrigerant}
-              {u.stages ? ` · ${u.stages}` : ""}
-            </option>
-          ))}
-        </select>
-      </label>
-      {current && <p className="mt-2 text-xs leading-relaxed text-muted">{current.line ? `${current.line}. ` : ""}{current.notes || current.status}</p>}
-    </div>
-  );
-}
-
-function ventLabel(u: Unit) {
-  if (u.vent === "pvc") return "90%+ PVC";
-  if (u.vent === "b") return "80% B-vent";
-  if (u.role === "furnace") return "вент не указан";
-  return "хладагент не разведён";
-}
-
-function SelectRow({ label, value, onChange, options }: { label: string; value: string; onChange: (id: string) => void; options: { id: string; label: string }[] }) {
-  return (
-    <label className="block rounded-xl border border-ink/15 bg-surface p-3 text-sm font-medium">
-      {label}
-      <select value={value} onChange={(e) => onChange(e.target.value)} className="mt-2 min-h-11 w-full rounded-md border border-ink/15 bg-bg px-3 font-normal">
-        {options.map((o) => (
-          <option key={o.id || "empty"} value={o.id}>
-            {o.label}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
-function Catalog({ query, setQuery, onUse }: { query: string; setQuery: (q: string) => void; onUse: (u: Unit) => void }) {
-  const [role, setRole] = useState<Role | "all">("all");
-  const list = units.filter((u) => {
-    if (role !== "all" && u.role !== role) return false;
-    const blob = `${u.brand} ${u.model} ${u.notes} ${u.refrigerant} ${u.line}`.toLowerCase();
-    return blob.includes(query.trim().toLowerCase());
-  });
-  const roles: { id: Role | "all"; label: string }[] = [
-    { id: "all", label: "Все" },
-    { id: "outdoor", label: "Наружные" },
-    { id: "ahandler", label: "Фанкойлы" },
-    { id: "coil", label: "Змеевики" },
-    { id: "furnace", label: "Печи" },
-    { id: "ductless-out", label: "Мини наружные" },
-    { id: "ductless-in", label: "Мини внутренние" },
-  ];
-  return (
-    <div>
-      <div className="mb-3 flex items-center gap-2 rounded-md border border-ink/15 bg-surface px-3">
-        <Search className="size-4 text-muted" aria-hidden="true" />
-        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Модель, хладагент, пометка" className="min-h-11 w-full bg-transparent text-sm outline-none" />
-      </div>
-      <div className="mb-4 flex flex-wrap gap-2">
-        {roles.map((r) => (
-          <button key={r.id} type="button" onClick={() => setRole(r.id)} className={`min-h-11 rounded-full px-3 text-sm ${role === r.id ? "bg-ink text-bg" : "bg-surface text-ink"}`}>
-            {r.label}
-          </button>
-        ))}
-      </div>
-      <p className="mb-3 font-mono text-xs text-muted">{list.length} из {units.length}</p>
-      <ul className="grid gap-3 sm:grid-cols-2">
-        {list.slice(0, 80).map((u) => (
-          <li key={u.id} className="rounded-xl border border-ink/15 bg-surface p-4">
-            <p className="font-mono text-xs text-brass">{u.brand}</p>
-            <h2 className="mt-1 font-mono text-lg font-semibold">{u.model}</h2>
-            <p className="mt-2 text-sm text-muted">{u.refrigerant} · {u.role}{u.stages ? ` · ${u.stages}` : ""}</p>
-            {u.notes && <p className="mt-2 text-sm leading-relaxed">{u.notes}</p>}
-            <button type="button" onClick={() => onUse(u)} className="mt-3 min-h-11 text-sm font-medium text-brass">
-              Поставить на стенд
-            </button>
-          </li>
-        ))}
-      </ul>
-      {list.length > 80 && <p className="mt-3 text-sm text-muted">Показаны первые 80. Сузь фильтр.</p>}
-    </div>
-  );
-}
-
-function Decoder({ onUse }: { onUse: (id: string, serial: string) => void }) {
-  const [raw, setRaw] = useState("27SPA660A003");
-  const decoded = decodeModel(raw);
-  return (
-    <div className="max-w-xl">
-      <label className="block text-sm font-medium">
-        Номер с шильдика
-        <input value={raw} onChange={(e) => setRaw(e.target.value)} className="mt-2 min-h-11 w-full rounded-md border border-ink/15 bg-surface px-3 font-mono" />
-      </label>
-      <ul className="mt-4 flex flex-col gap-2">
-        {decoded.lines.map((line) => (
-          <li key={line.k} className="rounded-md border border-ink/15 bg-surface px-3 py-2">
-            <p className="font-mono text-xs text-brass">{line.k}</p>
-            <p className="text-sm">{line.v}</p>
-          </li>
-        ))}
-      </ul>
-      {decoded.unit && (decoded.unit.role === "outdoor" || decoded.unit.role === "ductless-out") && (
-        <button type="button" onClick={() => onUse(decoded.unit!.id, raw.trim())} className="mt-4 min-h-11 rounded-md bg-ink px-4 text-sm font-medium text-bg">
-          Поставить {decoded.unit.model} на стенд
-        </button>
-      )}
-      <p className="mt-4 text-sm leading-relaxed text-muted">
-        Carrier: 24/25 — R-410A кондиционер и тепловой насос, 26/27 — то же на R-454B. Третья буква S/T/V — ступени, четвёртая C/P/N — Comfort / Performance / Infinity. Две цифры номинала: 60 = 5 т. Bryant: первая цифра 1 или 2 — кондиционер или насос, вторая 3/4/9 — Legacy / Preferred / Evolution.
-      </p>
-    </div>
   );
 }
