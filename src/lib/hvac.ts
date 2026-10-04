@@ -50,7 +50,10 @@ export const controls: Control[] = [
   { id: "systxccwic01", brand: "Carrier", name: "Infinity Wi-Fi SYSTXCCWIC01", protocol: "abcd", wifi: true, y2: false, pek: false, source: "F086" },
   { id: "systxbbuid01", brand: "Bryant", name: "Evolution SYSTXBBUID01 / Connex", protocol: "abcd", wifi: true, y2: false, pek: false, source: "F086" },
   { id: "ecobee-prem", brand: "ecobee", name: "ecobee Premium", protocol: "24v", wifi: true, y2: true, pek: true, source: "ECO_PREM, F004" },
+  { id: "ecobee-701", brand: "ecobee", name: "ecobee 701", protocol: "24v", wifi: true, y2: true, pek: true, source: "24V ecobee; отдельной карты 701 в базе нет" },
   { id: "ecobee3lite", brand: "ecobee", name: "ecobee3 lite", protocol: "24v", wifi: true, y2: true, pek: true, source: "ECO_3L, F004" },
+  { id: "nest", brand: "Nest", name: "Nest", protocol: "24v", wifi: true, y2: true, pek: false, source: "24V; отдельной карты Nest в базе нет" },
+  { id: "payne", brand: "Payne", name: "Payne", protocol: "24v", wifi: false, y2: true, pek: false, source: "24V; отдельной карты Payne в базе нет" },
   { id: "t6", brand: "Honeywell", name: "Honeywell T6 Pro", protocol: "24v", wifi: false, y2: true, pek: false, source: "RES_T6, F016" },
   { id: "cor", brand: "Carrier", name: "Carrier Cor", protocol: "24v", wifi: true, y2: true, pek: false, source: "F004" },
   { id: "housewise", brand: "Bryant", name: "Bryant Housewise", protocol: "24v", wifi: true, y2: true, pek: false, source: "F004" },
@@ -971,4 +974,43 @@ export function orientUnit(unit: Unit): Orient {
     steps: [unit.refrigerant === "R-454B" ? "На змеевике печи Y идёт через полевую RDS." : "Плата A2L не нужна."],
     source: "F004, F094",
   }
+}
+
+export type Place = "closet" | "garage" | "attic" | "basement" | "open"
+export type Stance = "up" | "down" | "horizontal"
+
+export function suggestRds(outdoor: Unit | null, indoor: Unit | null, coil: Unit | null): RdsId {
+  const gas = outdoor?.refrigerant === "R-454B" || indoor?.refrigerant === "R-454B" || coil?.refrigerant === "R-454B"
+  if (!gas) return "none"
+  if ((outdoor?.crossover || indoor?.crossover) && !coil) return "none"
+  if (indoor?.builtinRds) return "builtin"
+  if (coil) return "field"
+  return "none"
+}
+
+export function placeNeeds(place: Place, stance: Stance, furnace: boolean): { title: string; detail: string }[] {
+  const out: { title: string; detail: string }[] = []
+  if (stance === "up" && (place === "closet" || place === "garage")) {
+    out.push({
+      title: "Filter base",
+      detail: "Вертикально вверх в клозете или гараже: в заказе нужен filter base или готовый нижний return. Без него фильтр под шкаф не встаёт.",
+    })
+  } else if (stance === "down") {
+    out.push({
+      title: "Не нижний base",
+      detail: "Downflow: нижний filter base от установки вверх сюда не ставят. Фильтр в обратке сверху.",
+    })
+  } else if (stance === "horizontal") {
+    out.push({
+      title: "Фильтр в канале",
+      detail: "Горизонтально: filter base под шкаф не нужен. Фильтр стоит в обратном воздуховоде.",
+    })
+  }
+  if (place === "garage" && furnace) {
+    out.push({
+      title: "Печь в гараже",
+      detail: "Воздух на горение и зазоры — по IM этой печи. Дюймы корпуса база не хранит.",
+    })
+  }
+  return out
 }
