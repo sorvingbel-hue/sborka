@@ -805,3 +805,170 @@ export function listBy(role: Role | Role[]): Unit[] {
   const roles = Array.isArray(role) ? role : [role]
   return units.filter((u) => roles.includes(u.role))
 }
+
+export type Orient = {
+  kicker: string
+  answer: string
+  wrong: string
+  chips: { name: string; hint: string }[]
+  steps: string[]
+  source: string
+}
+
+export function orientUnit(unit: Unit): Orient {
+  if (unit.role === "ductless-out" || unit.role === "ductless-in") {
+    return {
+      kicker: "Мини-сплит",
+      answer: "Свой межблочный кабель. Это не 24V канального термостата.",
+      wrong: "S1/S2 не сажать на R, C, Y.",
+      chips: [
+        { name: "L1 L2", hint: "питание по шильдику" },
+        { name: "S1 S2", hint: "связь блоков, не 24V" },
+      ],
+      steps: [
+        "Головка и наружный блок одного хладагента.",
+        unit.refrigerant === "R-454B" ? "Сенсор ductless срабатывает на 10% LFL, не на 20% как канальный." : "На R-410A плату A2L не добавлять.",
+      ],
+      source: "INS-008, CAR_TG",
+    }
+  }
+  if (unit.control === "mura-24v" || (unit.crossover && unit.role !== "furnace" && unit.role !== "coil")) {
+    return {
+      kicker: "Термостат · 37MURA / 37MUHA",
+      answer: "B. Под напряжением в нагреве.",
+      wrong: "Не копируй обычный Carrier: там O в охлаждении. На S1/S2 24 вольта нельзя.",
+      chips: [
+        { name: "R", hint: "24V hot" },
+        { name: "C", hint: "common" },
+        { name: "Y", hint: "компрессор" },
+        { name: "B", hint: "реверс, напряжение в HEAT" },
+        { name: "W", hint: "догрев" },
+        { name: "G", hint: "вентилятор" },
+      ],
+      steps: [
+        "В пульте: heat pump. Реверсивный клапан — B, energized in heating.",
+        "DIP SW1-2 по IM. S1/S2 оставь связью.",
+        "Полевую RDS с печи и встроенную FE5B сюда не переноси. Сенсор бери из IM и не обходи.",
+      ],
+      source: "MURA_IM, F016, F094",
+    }
+  }
+  if (unit.builtinRds) {
+    const talking = unit.bus === "abcd"
+    return {
+      kicker: "RDS во фанкойле",
+      answer: "Коробка уже внутри. FE5B, FJ5 или FT5.",
+      wrong: "Вторую, полевую, сверху не ставить. Y не обходить.",
+      chips: talking
+        ? [
+            { name: "Плата", hint: "в корпусе, сенсор 20% LFL" },
+            { name: "A", hint: "зелёный, данные" },
+            { name: "B", hint: "жёлтый, данные" },
+            { name: "C", hint: "белый, common" },
+            { name: "D", hint: "красный, 24V hot" },
+          ]
+        : [
+            { name: "Плата", hint: "в корпусе фанкойла" },
+            { name: "Сенсор", hint: "20% LFL" },
+          ],
+      steps: [
+        talking ? "Пульт только Infinity / Evolution. Обычный 24V этот фанкойл не найдёт. A и B не менять." : "Обход сенсора в базе записан как ошибка.",
+        "После срабатывания нагрев гасится, вентилятор ещё 5 минут.",
+      ],
+      source: "FE5B, F094, F086",
+    }
+  }
+  if (unit.control === "abcd" || unit.bus === "abcd") {
+    return {
+      kicker: "Пульт Infinity / Evolution",
+      answer: "Только шина ABCD. Обычный термостат блок не найдёт.",
+      wrong: "A и B здесь данные, не клапан теплового насоса. Местами не менять.",
+      chips: [
+        { name: "A", hint: "зелёный, данные" },
+        { name: "B", hint: "жёлтый, данные" },
+        { name: "C", hint: "белый, 24V common" },
+        { name: "D", hint: "красный, 24V hot" },
+      ],
+      steps: [
+        "Сначала пульт и внутренний блок коротким кабелем. Потом наружный, каждый раз заново install.",
+        unit.builtinRds ? "Плата A2L уже в корпусе. Вторую коробку не ставить." : "Отдельной клеммы Y на этой шине нет.",
+        "На печи DIP SW-4 в OFF. C–D около 24 В.",
+      ],
+      source: "UI_SI, F086",
+    }
+  }
+  if (unit.role === "coil") {
+    const a2l = unit.refrigerant === "R-454B"
+    return {
+      kicker: "RDS на змеевике печи",
+      answer: a2l ? "Полевая коробка. Y с термостата в неё, и только потом на блок." : "Коробку A2L не ставить.",
+      wrong: a2l ? "Напрямую на наружный Y не кидать." : "Это не R-454B. Чужую dissipation board не вешать.",
+      chips: a2l
+        ? [
+            { name: "Y", hint: "термостат → плата → наружный" },
+            { name: "W", hint: "тоже через плату, иначе код 7/8" },
+            { name: "Сенсор", hint: "20% LFL, не обходить" },
+          ]
+        : [{ name: "Y", hint: "с термостата сразу на блок" }],
+      steps: a2l
+        ? ["Мигание 7 или 8 — перепутаны Y/W.", "Мигание 1 — сенсор увидел утечку. Плату не отключают, блоуэр ещё 5 минут."]
+        : ["R-410A и R-22 живут без сенсора и без dissipation board."],
+      source: "F094, F095",
+    }
+  }
+  if (unit.role === "furnace") {
+    const vent = unit.vent === "pvc" ? "PVC, Cat IV. Не в Type B." : unit.vent === "b" ? "Type B, 80%. Не в PVC." : "Процент печи смотри на шильдике, не угадывай."
+    return {
+      kicker: "Печь",
+      answer: vent,
+      wrong: "Поплавок рвёт R, не землю. Предохранитель как на плате, обычно 3 A.",
+      chips: [
+        { name: "R", hint: "24V hot, поплавок здесь" },
+        { name: "C", hint: "common" },
+        { name: "W", hint: "нагрев" },
+        { name: "G", hint: "вентилятор" },
+      ],
+      steps: ["Перепутанные R и C сажают предохранитель. Новый не ставь, пока не прозвонишь кабель."],
+      source: "F002, INS-005",
+    }
+  }
+  if (unit.duty === "hp") {
+    const two = /2-stage|2 ступ/i.test(unit.stages + unit.notes)
+    return {
+      kicker: "Термостат · тепловой насос Carrier / Bryant",
+      answer: "O. Под напряжением в охлаждении.",
+      wrong: "Не в нагреве и не на клемме B. B — только у 37MURA / 37MUHA.",
+      chips: [
+        { name: "R", hint: "24V hot, поплавок рвёт R" },
+        { name: "C", hint: "common" },
+        { name: "Y", hint: unit.refrigerant === "R-454B" ? "через RDS, если змеевик печи" : "компрессор" },
+        { name: "O", hint: "реверс, напряжение в COOL" },
+        { name: "W", hint: "догрев" },
+        { name: "G", hint: "вентилятор" },
+        ...(two ? [{ name: "Y2", hint: "вторая ступень" }] : []),
+      ],
+      steps: [
+        "В настройках пульта: heat pump, не conventional. O/B = O. Energized in cooling.",
+        "Проверка: в режиме Cool между O и C около 24 В. В Heat на O напряжения нет.",
+        unit.refrigerant === "R-454B" ? "Змеевик печи на R-454B: Y сначала в полевую RDS, потом на блок. Фанкойл FE5B / FJ5 / FT5: коробка уже внутри." : "R-410A: dissipation board не нужна.",
+      ],
+      source: "F016, SM_9, F094",
+    }
+  }
+  const two = /2-stage|2 ступ/i.test(unit.stages + unit.notes)
+  return {
+    kicker: "Термостат · кондиционер",
+    answer: "Клапана нет. O и B не подключать.",
+    wrong: "Не ставь heat pump в настройках пульта. Это conventional.",
+    chips: [
+      { name: "R", hint: "24V hot" },
+      { name: "C", hint: "common" },
+      { name: "Y", hint: "охлаждение" },
+      { name: "W", hint: "нагрев печи или тенов" },
+      { name: "G", hint: "вентилятор" },
+      ...(two ? [{ name: "Y2", hint: "вторая ступень" }] : []),
+    ],
+    steps: [unit.refrigerant === "R-454B" ? "На змеевике печи Y идёт через полевую RDS." : "Плата A2L не нужна."],
+    source: "F004, F094",
+  }
+}
